@@ -66,11 +66,6 @@ func (r *RoleDsBackup) ProcessConsensusMsg(msg *pb.Message, from *pb.PeerEndpoin
 }
 
 func (r *RoleDsBackup) onWait4PoWSubmissionDone() error {
-	if r.peerServer.ConsensusData.PoWSubList.Len() == 0 {
-		ctx, cancle := context.WithTimeout(context.Background(), config.TIMEOUT_POW_SUBMISSION)
-		go r.Wait4PoWSubmission(ctx, cancle)
-		return nil
-	}
 	r.ChangeState(ps.STATE_DSBLOCK_CONSENSUS)
 	r.dsConsensusBackup.SetCurrentConsensusStage(pb.ConsensusType_DsBlockConsensus)
 	loggerDsBackup.Debugf("wait for POW_SUBMISSION finished")

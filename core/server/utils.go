@@ -53,6 +53,29 @@ type MsgChannel struct {
 	retStr string
 }
 
+type VotingPara struct {
+	DSN 				int32
+	DSf 				int32
+	PrepareThreshold 	int32
+	CommitThreshold 	int32
+	OutputThrehold 		int32
+}
+
+type VotingInData struct {
+	PrePrepareFlag 	map[string]int32
+	CommitSentFlag 	map[string]int32
+	PrepareCounter 	map[string]int32
+	CommitCounter 	map[string]int32
+	BA 				map[string]int32
+	PrepareMap 		map[string]map[string]int32
+	CommitMap 		map[string]map[string]int32
+	BAReady 		bool
+	MuPRE			sync.Mutex
+	MuCommit		sync.Mutex
+	Counter			int32
+	Saved			map[string]*pb.PoWSubmission
+}
+
 type ConsensusData struct {
 	CurrentDSBlock    *pb.DSBlock
 	CurrentFinalBlock *pb.TxBlock
@@ -62,6 +85,8 @@ type ConsensusData struct {
 	MicroBlockList    pb.SyncMicroBlockSubmissions
 	CurrentStage      pb.ConsensusType
 	LastStage         pb.ConsensusType
+	PoWVotePara		  VotingPara
+	PoWVoteInData	  VotingInData
 	//PubKeyToCoinBaseMap map[string][]byte
 }
 

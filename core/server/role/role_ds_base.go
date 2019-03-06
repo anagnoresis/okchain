@@ -157,19 +157,435 @@ func (r *RoleDsBase) ProcessPoWSubmission(msg *pb.Message, from *pb.PeerEndpoint
 	return nil
 }
 
+func composePoWSyncMsg(r *RoleDsBase, vote *pb.PoWVote, phase pb.PoWVoteMsgType) (*pb.Message, error) {
+	// composition of DS_PoWSync_PrepareMsg
+	resp := &pb.Message{}
+	resp.Type = pb.Message_DS_PoWSync
+	resp.Timestamp = pb.CreateUtcTimestamp()
+	resp.Peer = r.peerServer.SelfNode
+	powVote := &pb.PoWVote{Owner:vote.Owner, Peer:r.peerServer.SelfNode, Phase:phase,
+		PoWContainer:vote.PoWContainer, Signature:vote.Signature}
+	data, err := proto.Marshal(powVote)
+	if err != nil {
+		roleDsBaseLogger.Errorf("prepare vote marshal error %s", err.Error())
+		return nil, err
+	}
+	resp.Payload = data
+	sig, err := r.peerServer.MsgSinger.SignHash(powVote.Hash().Bytes(), nil)
+	if err != nil {
+		roleDsBaseLogger.Errorf("bls message sign failed with error: %s", err.Error())
+		return nil, ErrSignMessage
+	}
+	resp.Signature = sig
+	// end of composition
+
+	return resp, nil
+}
+
+func updatePrepareFlag(r *RoleDsBase, vote *pb.PoWVote, sender *pb.PeerEndpoint) {
+	if _, exist := r.peerServer.ConsensusData.PoWVoteInData.PrepareMap[vote.Owner.Id.Name]; exist {
+		r.peerServer.ConsensusData.PoWVoteInData.PrepareMap[vote.Owner.Id.Name][sender.Id.Name] = 1
+	} else {
+		tmpMap := make(map[string]int32)
+		tmpMap[sender.Id.Name] = 1
+		r.peerServer.ConsensusData.PoWVoteInData.PrepareMap[vote.Owner.Id.Name] = tmpMap
+	}
+	// PrepareCounter[Owner.Id]++
+	r.peerServer.ConsensusData.PoWVoteInData.PrepareCounter[vote.Owner.Id.Name]++
+}
+
+func updateCommitFlag(r *RoleDsBase, vote *pb.PoWVote, sender *pb.PeerEndpoint) {
+	if _, exist := r.peerServer.ConsensusData.PoWVoteInData.CommitMap[vote.Owner.Id.Name]; exist {
+		r.peerServer.ConsensusData.PoWVoteInData.CommitMap[vote.Owner.Id.Name][sender.Id.Name] = 1
+	} else {
+		tmpMap := make(map[string]int32)
+		tmpMap[sender.Id.Name] = 1
+		r.peerServer.ConsensusData.PoWVoteInData.CommitMap[vote.Owner.Id.Name] = tmpMap
+	}
+	// CommitCounter[Owner.Id]++
+	r.peerServer.ConsensusData.PoWVoteInData.CommitCounter[vote.Owner.Id.Name]++
+}
+
+func (r *RoleDsBase) ProcessPoWSync(msg *pb.Message, from *pb.PeerEndpoint) error {
+	// BFT-like Asynchronous Common Subset
+	roleDsBaseLogger.Debugf("[%s]: RoleDsBase ProcessPoWSync", util.GId)
+	vote := &pb.PoWVote{}
+
+	err := proto.Unmarshal(msg.Payload, vote)
+	if err != nil {
+		roleDsBaseLogger.Errorf("unmarshal pow vote message error: %s", err.Error())
+		return ErrUnmarshalMessage
+	}
+
+	err = r.peerServer.MsgVerify(msg, vote.Hash().Bytes())
+	if err != nil {
+		roleDsBaseLogger.Errorf("bls message signature check error: %s", err.Error())
+		return ErrVerifyMessage
+	}
+
+	hOwner := []interface{}{vote.Owner, vote.PoWContainer}
+	ret, err := r.peerServer.MsgSinger.VerifyHash(util.Hash(hOwner).Bytes(), vote.Signature, vote.Owner.Pubkey)
+	if err != nil {
+		return err
+	}
+	if !ret {
+		return errors.New("check vote signature failed")
+	}
+
+	roleDsBaseLogger.Debugf("receive %s's vote message from %s: type: %d, content: %+v%", vote.Owner.Id.Name,
+		vote.Peer.Id.Name, vote.Phase, vote.PoWContainer)
+
+	if vote.Phase == pb.PoWVote_PREPREPARE {
+		r.peerServer.ConsensusData.PoWVoteInData.MuPRE.Lock()
+		if _, ok := r.peerServer.ConsensusData.PoWVoteInData.PrePrepareFlag[vote.Owner.Id.Name]; ok {
+			r.peerServer.ConsensusData.PoWVoteInData.MuPRE.Unlock()
+			roleDsBaseLogger.Debugf("receive %s's redundant vote from %s: type: %d", vote.Owner.Id.Name,
+				vote.Peer.Id.Name, vote.Phase)
+			return nil
+		}
+
+		r.peerServer.ConsensusData.PoWVoteInData.PrePrepareFlag[vote.Owner.Id.Name] = 1
+		r.peerServer.ConsensusData.PoWVoteInData.MuPRE.Unlock()
+
+		resp, err := composePoWSyncMsg(r, vote, pb.PoWVote_PREPARE)
+		if err != nil {
+			roleDsBaseLogger.Errorf("compose vote error %s", err.Error())
+			return err
+		}
+
+		r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Lock()
+		// PrepareMap[Owner.Id][SelfNode.Id] = 1
+		updatePrepareFlag(r, vote, r.peerServer.SelfNode)
+		r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+
+		// Multicast Prepare Message to DS committee
+		err = r.peerServer.Multicast(resp, r.peerServer.Committee)
+		if err != nil {
+			roleDsBaseLogger.Errorf("failed to send votes to all DS committee")
+			return ErrMultiCastMessage
+		}
+
+		roleDsBaseLogger.Debugf("send %s's vote message from %s: type: %d, content: %+v%", vote.Owner.Id.Name,
+			r.peerServer.SelfNode.Id.Name, pb.PoWVote_PREPARE, vote.PoWContainer)
+
+		r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Lock()
+
+		if r.peerServer.ConsensusData.PoWVoteInData.PrepareCounter[vote.Owner.Id.Name] >=
+			r.peerServer.ConsensusData.PoWVotePara.PrepareThreshold &&
+			r.peerServer.ConsensusData.PoWVoteInData.CommitSentFlag[vote.Owner.Id.Name] == 0 {
+			// composition of DS_PoWSync_CommitMsg
+			resp, err := composePoWSyncMsg(r, vote, pb.PoWVote_COMMIT)
+			if err != nil {
+				roleDsBaseLogger.Errorf("compose vote error %s", err.Error())
+				return err
+			}
+
+			// CommitSentFlag[Owner.Id] = 1
+			r.peerServer.ConsensusData.PoWVoteInData.CommitSentFlag[vote.Owner.Id.Name] = 1
+			updateCommitFlag(r, vote, r.peerServer.SelfNode)
+			roleDsBaseLogger.Debugf("send %s's vote message from %s: type: %d, content: %+v%", vote.Owner.Id.Name,
+				r.peerServer.SelfNode.Id.Name, pb.PoWVote_COMMIT, vote.PoWContainer)
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+
+			// Multicast Commit Message to DS committee
+			err = r.peerServer.Multicast(resp, r.peerServer.Committee)
+			if err != nil {
+				roleDsBaseLogger.Errorf("failed to send votes to all DS committee")
+				return ErrMultiCastMessage
+			}
+		} else {
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+		}
+	} else if vote.Phase == pb.PoWVote_PREPARE {
+		r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Lock()
+		if r.peerServer.ConsensusData.PoWVoteInData.PrepareMap[vote.Owner.Id.Name][vote.Peer.Id.Name] == 1 {
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+			roleDsBaseLogger.Debugf("receive %s's redundant vote from %s: type: %d", vote.Owner.Id.Name,
+				vote.Peer.Id.Name, vote.Phase)
+			return nil
+		}
+		// PrepareMap[Owner.Id][Peer.Id] = 1
+		updatePrepareFlag(r, vote, vote.Peer)
+
+		if r.peerServer.ConsensusData.PoWVoteInData.PrepareCounter[vote.Owner.Id.Name] >=
+			r.peerServer.ConsensusData.PoWVotePara.PrepareThreshold &&
+			r.peerServer.ConsensusData.PoWVoteInData.CommitSentFlag[vote.Owner.Id.Name] == 0 {
+			// composition of DS_PoWSync_CommitMsg
+			resp, err := composePoWSyncMsg(r, vote, pb.PoWVote_COMMIT)
+			if err != nil {
+				roleDsBaseLogger.Errorf("compose vote error %s", err.Error())
+				return err
+			}
+
+			// CommitSentFlag[Owner.Id] = 1
+			r.peerServer.ConsensusData.PoWVoteInData.CommitSentFlag[vote.Owner.Id.Name] = 1
+			updateCommitFlag(r, vote, r.peerServer.SelfNode)
+			roleDsBaseLogger.Debugf("send %s's vote message from %s: type: %d, content: %+v%", vote.Owner.Id.Name,
+				r.peerServer.SelfNode.Id.Name, pb.PoWVote_COMMIT, vote.PoWContainer)
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+
+			// Multicast Commit Message to DS committee
+			err = r.peerServer.Multicast(resp, r.peerServer.Committee)
+			if err != nil {
+				roleDsBaseLogger.Errorf("failed to send votes to all DS committee")
+				return ErrMultiCastMessage
+			}
+		} else {
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+		}
+	} else {
+		r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Lock()
+
+		if r.peerServer.ConsensusData.PoWVoteInData.CommitMap[vote.Owner.Id.Name][vote.Peer.Id.Name] == 1 {
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+			roleDsBaseLogger.Debugf("receive %s's redundant vote from %s: type: %d", vote.Owner.Id.Name,
+				vote.Peer.Id.Name, vote.Phase)
+			return nil
+		}
+
+		updateCommitFlag(r, vote, vote.Peer)
+
+		if r.peerServer.ConsensusData.PoWVoteInData.CommitCounter[vote.Owner.Id.Name] >=
+			r.peerServer.ConsensusData.PoWVotePara.CommitThreshold &&
+			r.peerServer.ConsensusData.PoWVoteInData.CommitSentFlag[vote.Owner.Id.Name] == 0 {
+			resp, err := composePoWSyncMsg(r, vote, pb.PoWVote_COMMIT)
+			if err != nil {
+				roleDsBaseLogger.Errorf("compose vote error %s", err.Error())
+				return err
+			}
+
+			// CommitSentFlag[Owner.Id] = 1
+			r.peerServer.ConsensusData.PoWVoteInData.CommitSentFlag[vote.Owner.Id.Name] = 1
+			roleDsBaseLogger.Debugf("send %s's vote message from %s: type: %d, content: %+v%", vote.Owner.Id.Name,
+				r.peerServer.SelfNode.Id.Name, pb.PoWVote_COMMIT, vote.PoWContainer)
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+
+			// Multicast Commit Message to DS committee
+			err = r.peerServer.Multicast(resp, r.peerServer.Committee)
+			if err != nil {
+				roleDsBaseLogger.Errorf("failed to send votes to all DS committee")
+				return ErrMultiCastMessage
+			}
+			return nil
+		}
+
+		if r.peerServer.ConsensusData.PoWVoteInData.CommitCounter[vote.Owner.Id.Name] >=
+			r.peerServer.ConsensusData.PoWVotePara.OutputThrehold &&
+			r.peerServer.ConsensusData.PoWVoteInData.BA[vote.Owner.Id.Name] == 0 &&
+			!r.peerServer.ConsensusData.PoWVoteInData.BAReady {
+			r.peerServer.ConsensusData.PoWVoteInData.BA[vote.Owner.Id.Name] = 1
+			r.peerServer.ConsensusData.PoWVoteInData.Counter++
+			for _, pow := range vote.PoWContainer {
+				r.peerServer.ConsensusData.PoWVoteInData.Saved[pow.Peer.Id.Name] = pow
+			}
+			roleDsBaseLogger.Debugf("%s's vote ready", vote.Owner.Id.Name)
+
+			if r.peerServer.ConsensusData.PoWVoteInData.Counter >= r.peerServer.ConsensusData.PoWVotePara.PrepareThreshold {
+				r.peerServer.ConsensusData.PoWVoteInData.BAReady = true
+				r.peerServer.ConsensusData.PoWSubList.Clear()
+				for _, item := range r.peerServer.ConsensusData.PoWVoteInData.Saved {
+					r.peerServer.ConsensusData.PoWSubList.Append(item)
+				}
+				roleDsBaseLogger.Debugf("%s's final pow len: %d with its content: %+v",
+					r.peerServer.SelfNode.Id.Name, r.peerServer.ConsensusData.PoWSubList.Len(),
+					r.peerServer.ConsensusData.PoWSubList)
+			}
+		}
+		r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+	}
+	return nil
+}
+
 func (r *RoleDsBase) Wait4PoWSubmission(ctx context.Context, cancle context.CancelFunc) {
 	r.cancelFunc = cancle
 	for {
 		select {
 		case <-ctx.Done():
 			// r.imp: RoleDsLead or RoleDsBackup
+			if r.peerServer.ConsensusData.PoWSubList.Len() == 0 {
+				newCtx, newCancel := context.WithTimeout(context.Background(), config.TIMEOUT_POW_SUBMISSION)
+				go r.Wait4PoWSubmission(newCtx, newCancel)
+				return
+			}
+
+			// BFT-like Asynchronous Common Subset
+			// N of DS consensus group
+			dsN := config.GetDSSize()
+			if dsN < 1 {
+				roleDsBaseLogger.Errorf("get bad ds size: %d", dsN)
+				r.peerServer.ConsensusData.PoWSubList.Sort()
+				r.peerServer.ConsensusData.PoWSubList.Dump()
+				r.imp.onWait4PoWSubmissionDone()
+				return
+			}
+
+			r.ChangeState(ps.STATE_WAIT4_POW_SYNC)
+
+			// f of DS consensus group
+			dsF := (dsN - 1) / 3
+			r.peerServer.ConsensusData.PoWVotePara.DSN = dsN
+			r.peerServer.ConsensusData.PoWVotePara.DSf = dsF
+			r.peerServer.ConsensusData.PoWVotePara.PrepareThreshold = dsN - dsF
+			r.peerServer.ConsensusData.PoWVotePara.CommitThreshold = dsF + 1
+			r.peerServer.ConsensusData.PoWVotePara.OutputThrehold = 2 * dsF + 1
+
+			r.peerServer.ConsensusData.PoWVoteInData.PrePrepareFlag = make(map[string]int32)
+			r.peerServer.ConsensusData.PoWVoteInData.CommitSentFlag = make(map[string]int32)
+			r.peerServer.ConsensusData.PoWVoteInData.PrepareCounter = make(map[string]int32)
+			r.peerServer.ConsensusData.PoWVoteInData.CommitCounter = make(map[string]int32)
+			r.peerServer.ConsensusData.PoWVoteInData.BA = make(map[string]int32)
+			r.peerServer.ConsensusData.PoWVoteInData.PrepareMap = make(map[string]map[string]int32)
+			r.peerServer.ConsensusData.PoWVoteInData.CommitMap = make(map[string]map[string]int32)
+			r.peerServer.ConsensusData.PoWVoteInData.BAReady = false
+			r.peerServer.ConsensusData.PoWVoteInData.Counter = 0
+			r.peerServer.ConsensusData.PoWVoteInData.Saved = make(map[string]*pb.PoWSubmission)
+
+			powList := make([]*pb.PoWSubmission, 0)
+			for i := 0; i < r.peerServer.ConsensusData.PoWSubList.Len(); i++ {
+				powList = append(powList, r.peerServer.ConsensusData.PoWSubList.Get(i))
+			}
+
+			hOwner := []interface{}{r.peerServer.SelfNode, powList}
+			voteSig, err := r.peerServer.MsgSinger.SignHash(util.Hash(hOwner).Bytes(), nil)
+			if err != nil {
+				roleDsBaseLogger.Errorf("bls message sign failed with error: %s", err.Error())
+				r.peerServer.ConsensusData.PoWSubList.Sort()
+				r.peerServer.ConsensusData.PoWSubList.Dump()
+				r.imp.onWait4PoWSubmissionDone()
+				return
+			}
+
+			powVote := &pb.PoWVote{Owner:r.peerServer.SelfNode, Peer:r.peerServer.SelfNode, Phase:pb.PoWVote_PREPREPARE,
+				PoWContainer:powList, Signature:voteSig}
+			if err != nil {
+				roleDsBaseLogger.Errorf("preprepare vote marshal error %s", err.Error())
+				r.peerServer.ConsensusData.PoWSubList.Sort()
+				r.peerServer.ConsensusData.PoWSubList.Dump()
+				r.imp.onWait4PoWSubmissionDone()
+				return
+			}
+
+			req, err := composePoWSyncMsg(r, powVote, pb.PoWVote_PREPREPARE)
+			if err != nil {
+				roleDsBaseLogger.Errorf("compose vote error: %s", err.Error())
+				r.peerServer.ConsensusData.PoWSubList.Sort()
+				r.peerServer.ConsensusData.PoWSubList.Dump()
+				r.imp.onWait4PoWSubmissionDone()
+				return
+			}
+			// end of composition
+
+			err = r.peerServer.Multicast(req, r.peerServer.Committee)
+			if err != nil {
+				roleDsBaseLogger.Errorf("failed to send votes to all DS committee")
+				r.peerServer.ConsensusData.PoWSubList.Sort()
+				r.peerServer.ConsensusData.PoWSubList.Dump()
+				r.imp.onWait4PoWSubmissionDone()
+				return
+			}
+
+			r.peerServer.ConsensusData.PoWVoteInData.MuPRE.Lock()
+			r.peerServer.ConsensusData.PoWVoteInData.PrePrepareFlag[r.peerServer.SelfNode.Id.Name] = 1
+			r.peerServer.ConsensusData.PoWVoteInData.MuPRE.Unlock()
+
+			roleDsBaseLogger.Debugf("send %s's vote message from %s: type: %d, content: %+v%", powVote.Owner.Id.Name,
+				powVote.Peer.Id.Name, powVote.Phase, powVote.PoWContainer)
+
+			respVote := &pb.PoWVote{Owner:r.peerServer.SelfNode, Peer:r.peerServer.SelfNode, Phase:pb.PoWVote_PREPARE,
+				PoWContainer:powList, Signature:voteSig}
+			resp, err := composePoWSyncMsg(r, respVote, pb.PoWVote_PREPARE)
+			if err != nil {
+				roleDsBaseLogger.Errorf("compose vote error %s", err.Error())
+				return
+			}
+			// end of composition
+
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Lock()
+			updatePrepareFlag(r, respVote, r.peerServer.SelfNode)
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+
+			err = r.peerServer.Multicast(resp, r.peerServer.Committee)
+			if err != nil {
+				roleDsBaseLogger.Errorf("failed to send votes to all DS committee")
+				r.peerServer.ConsensusData.PoWSubList.Sort()
+				r.peerServer.ConsensusData.PoWSubList.Dump()
+				r.imp.onWait4PoWSubmissionDone()
+				return
+			}
+
+			roleDsBaseLogger.Debugf("send %s's vote message from %s: type: %d, content: %+v%", respVote.Owner.Id.Name,
+				respVote.Peer.Id.Name, respVote.Phase, respVote.PoWContainer)
+
+			tCtx, tCancel := context.WithTimeout(context.Background(), config.TIMEOUT_POW_SYNC)
+			go r.Wait4PoWSync(tCtx, tCancel)
+			return
+		default:
+			roleDsBaseLogger.Debugf("wait %ds to collect PoW submission", r.peerServer.GetWait4PoWTime())
+			time.Sleep(time.Duration(r.peerServer.GetWait4PoWTime()) * time.Second)
+		}
+	}
+}
+
+func (r *RoleDsBase) Wait4PoWSync(ctx context.Context, cancel context.CancelFunc) {
+	r.cancelFunc = cancel
+	for {
+		select {
+		case <-ctx.Done():
 			r.peerServer.ConsensusData.PoWSubList.Sort()
 			r.peerServer.ConsensusData.PoWSubList.Dump()
 			r.imp.onWait4PoWSubmissionDone()
 			return
 		default:
-			roleDsBaseLogger.Debugf("wait %ds to collect PoW submission", r.peerServer.GetWait4PoWTime())
-			time.Sleep(time.Duration(r.peerServer.GetWait4PoWTime()) * time.Second)
+			r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Lock()
+			if r.peerServer.ConsensusData.PoWVoteInData.BAReady {
+				r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+				roleDsBaseLogger.Debugf("ba ready and cancel Wait4PoWSync")
+				r.cancelFunc()
+			} else {
+				r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
+
+				roleDsBaseLogger.Debugf("wait %ds to sync PoW submission", r.peerServer.GetWait4PoWTime())
+				time.Sleep(time.Duration(r.peerServer.GetWait4PoWTime()) * time.Second)
+
+				r.peerServer.ConsensusData.PoWVoteInData.MuPRE.Lock()
+				if r.peerServer.ConsensusData.PoWVoteInData.PrepareCounter[r.peerServer.SelfNode.Id.Name] == 1 {
+					r.peerServer.ConsensusData.PoWVoteInData.MuPRE.Unlock()
+
+					powList := make([]*pb.PoWSubmission, 0)
+					for i := 0; i < r.peerServer.ConsensusData.PoWSubList.Len(); i++ {
+						powList = append(powList, r.peerServer.ConsensusData.PoWSubList.Get(i))
+					}
+
+					hOwner := []interface{}{r.peerServer.SelfNode, powList}
+					voteSig, err := r.peerServer.MsgSinger.SignHash(util.Hash(hOwner).Bytes(), nil)
+					if err != nil {
+						roleDsBaseLogger.Errorf("bls message sign failed with error: %s", err.Error())
+						r.peerServer.ConsensusData.PoWSubList.Sort()
+						r.peerServer.ConsensusData.PoWSubList.Dump()
+						r.imp.onWait4PoWSubmissionDone()
+						return
+					}
+
+					powVote := &pb.PoWVote{Owner:r.peerServer.SelfNode, Peer:r.peerServer.SelfNode, Phase:pb.PoWVote_PREPREPARE,
+						PoWContainer:powList, Signature:voteSig}
+					req, err := composePoWSyncMsg(r, powVote, pb.PoWVote_PREPREPARE)
+					if err != nil {
+						roleDsBaseLogger.Errorf("compose vote error: %s", err.Error())
+						continue
+					}
+					// end of composition
+
+					err = r.peerServer.Multicast(req, r.peerServer.Committee)
+					if err != nil {
+						roleDsBaseLogger.Errorf("failed to send votes to all DS committee")
+						continue
+					}
+					roleDsBaseLogger.Debugf("re-send %s's vote message from %s: type: %d, content: %+v%", powVote.Owner.Id.Name,
+						powVote.Peer.Id.Name, powVote.Phase, powVote.PoWContainer)
+				} else {
+					r.peerServer.ConsensusData.PoWVoteInData.MuPRE.Unlock()
+				}
+			}
 		}
 	}
 }

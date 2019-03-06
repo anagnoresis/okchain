@@ -57,6 +57,9 @@ type STATE_VIEWCHANGE_CONSENSUS_PREP struct {
 type STATE_VIEWCHANGE_CONSENSUS struct {
 	StateBase
 }
+type STATE_Wait4POW_SYNC struct {
+	StateBase
+}
 
 func (state *STATE_DSBLOCK_CONSENSUS) ProcessMsg(r ps.IRole, msg *pb.Message, from *pb.PeerEndpoint) error {
 	return state.processConsensusMsg(r, msg, from)
@@ -95,6 +98,16 @@ func (state *STATE_Wait4POW_SUBMISSION) ProcessMsg(r ps.IRole, msg *pb.Message, 
 
 	if msg.Type == pb.Message_DS_PoWSubmission {
 		r.ProcessPoWSubmission(msg, from)
+	}
+	return nil
+}
+
+func (state *STATE_Wait4POW_SYNC) ProcessMsg(r ps.IRole, msg *pb.Message, from *pb.PeerEndpoint) error {
+	logger.Debugf("[%s]: enter StateWait4POW_SYNC ProcessMsg", util.GId)
+	defer logger.Debugf("[%s]: exit StateWait4POW_SYNC ProcessMsg", util.GId)
+
+	if msg.Type == pb.Message_DS_PoWSync {
+		r.ProcessPoWSync(msg, from)
 	}
 	return nil
 }

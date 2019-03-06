@@ -361,6 +361,11 @@ func (t *PoWSubmission) Hash() (h common.Hash) {
 	return util.Hash(m)
 }
 
+func (t *PoWVote) Hash() (h common.Hash) {
+	m := []interface{}{t.Peer.Pubkey, t.Phase, t.Signature}
+	return util.Hash(m)
+}
+
 func (t *MicroBlock) Hash() (h common.Hash) {
 	m := []interface{}{t.Header.BlockNumber, t.Header.TxNum, t.Header.DSBlockNum, t.Header.DSBlockHash, t.Miner.Pubkey, t.ShardID, t.ShardingLeadCoinBase}
 	for i := 0; i < len(t.Transactions); i++ {

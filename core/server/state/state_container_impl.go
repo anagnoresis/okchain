@@ -43,6 +43,11 @@ func newStateContainer() *ps.StateContainer {
 		c.StateMap[ps.STATE_WAIT4_POW_SUBMISSION] = s
 	}
 	{
+		s := &STATE_Wait4POW_SYNC{}
+		s.imp = s
+		c.StateMap[ps.STATE_WAIT4_POW_SYNC] = s
+	}
+	{
 		s := &STATE_DSBLOCK_CONSENSUS_PREP{}
 		s.imp = s
 		c.StateMap[ps.STATE_DSBLOCK_CONSENSUS_PREP] = s

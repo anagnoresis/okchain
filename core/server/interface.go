@@ -33,6 +33,7 @@ type IState interface {
 type DsMessageHandler interface {
 	ProcessSetPrimary(msg *pb.Message, from *pb.PeerEndpoint) error
 	ProcessPoWSubmission(msg *pb.Message, from *pb.PeerEndpoint) error
+	ProcessPoWSync(msg *pb.Message, from *pb.PeerEndpoint) error
 	ProcessMicroBlockSubmission(msg *pb.Message, from *pb.PeerEndpoint) error
 }
 

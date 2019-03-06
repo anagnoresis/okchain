@@ -118,6 +118,12 @@ func (r *RoleBase) ProcessPoWSubmission(msg *pb.Message, from *pb.PeerEndpoint) 
 	util.OkChainPanic("Invalid invoke")
 	return nil
 }
+
+func (r *RoleBase) ProcessPoWSync(msg *pb.Message, from *pb.PeerEndpoint) error {
+	util.OkChainPanic("Invalid invoke")
+	return nil
+}
+
 func (r *RoleBase) ProcessMicroBlockSubmission(msg *pb.Message, from *pb.PeerEndpoint) error {
 	util.OkChainPanic("Invalid invoke")
 	return nil

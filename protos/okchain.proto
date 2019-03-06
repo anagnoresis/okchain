@@ -20,7 +20,8 @@ service Peer {
 //|	1-2	|	DirectoryService::ProcessDSBlockConsensus	 
 //|	1-3	|	DirectoryService::ProcessMicroblockSubmission	 
 //|	1-4	|	DirectoryService::ProcessFinalBlockConsensus	 
-//|	1-5	|	DirectoryService::ProcessViewChangeConsensus	 
+//|	1-5	|	DirectoryService::ProcessViewChangeConsensus
+//|	1-6	|	DirectoryService::ProcessPoWSync
 //|	2-0	|	Node::ProcessStartPoW	 
 //|	2-1	|	Node::ProcessDSBlock	 
 //|	2-2	|	Node::ProcessCreateTransaction	 
@@ -46,6 +47,7 @@ message Message {                   //消息结构
         DS_MicroblockSubmission = 103;
         DS_FinalBlockConsensus = 104;
         DS_ViewChangeConsensus = 105;
+        DS_PoWSync = 106;
         Node_ProcessStartPoW = 200;
         Node_ProcessDSBlock = 201;
         Node_MircoBlockConsensus = 202;
@@ -302,4 +304,17 @@ message InformSharding{
     int32 ShardingSize = 2;
 	repeated PeerEndpoint DsList = 3;
     repeated PeerEndpoint ShardingList = 4;
+}
+
+message PoWVote {
+    PeerEndpoint Owner = 1;
+    PeerEndpoint Peer = 2;
+    enum msgType {
+        PREPREPARE = 0;
+        PREPARE = 1;
+        COMMIT = 2;
+    }
+    msgType Phase = 3;
+    bytes Signature = 4;
+    repeated PoWSubmission PoWContainer = 5;
 }

@@ -32,6 +32,7 @@ const (
 	STATE_FINALBLOCK_CONSENSUS        StateType = 107
 	STATE_VIEWCHANGE_CONSENSUS_PREP   StateType = 108
 	STATE_VIEWCHANGE_CONSENSUS        StateType = 109
+	STATE_WAIT4_POW_SYNC			  StateType = 110
 
 	// sharding state
 	STATE_SHARDING_IDLE             StateType = 210

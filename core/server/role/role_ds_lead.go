@@ -212,11 +212,6 @@ func (r *RoleDsLead) ProcessConsensusMsg(msg *pb.Message, from *pb.PeerEndpoint)
 func (r *RoleDsLead) onWait4PoWSubmissionDone() error {
 	// todo: ensure all backups go to state STATE_DSBLOCK_CONSENSUS before InitiateConsensus
 	// http://gitlab.okcoin-inc.com/okchain/go-okchain/issues/24#3-consensus_start_waittime
-	if r.peerServer.ConsensusData.PoWSubList.Len() == 0 {
-		ctx, cancle := context.WithTimeout(context.Background(), config.TIMEOUT_POW_SUBMISSION)
-		go r.Wait4PoWSubmission(ctx, cancle)
-		return nil
-	}
 
 	r.ChangeState(ps.STATE_DSBLOCK_CONSENSUS)
 	loggerDsLead.Debugf("wait for POW_SUBMISSION finished, begin to start dsblock consensus")
