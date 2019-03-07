@@ -276,6 +276,7 @@ func (r *RoleDsBase) ProcessPoWSync(msg *pb.Message, from *pb.PeerEndpoint) erro
 			// composition of DS_PoWSync_CommitMsg
 			resp, err := composePoWSyncMsg(r, vote, pb.PoWVote_COMMIT)
 			if err != nil {
+				r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
 				roleDsBaseLogger.Errorf("compose vote error %s", err.Error())
 				return err
 			}
@@ -313,6 +314,7 @@ func (r *RoleDsBase) ProcessPoWSync(msg *pb.Message, from *pb.PeerEndpoint) erro
 			// composition of DS_PoWSync_CommitMsg
 			resp, err := composePoWSyncMsg(r, vote, pb.PoWVote_COMMIT)
 			if err != nil {
+				r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
 				roleDsBaseLogger.Errorf("compose vote error %s", err.Error())
 				return err
 			}
@@ -350,6 +352,7 @@ func (r *RoleDsBase) ProcessPoWSync(msg *pb.Message, from *pb.PeerEndpoint) erro
 			r.peerServer.ConsensusData.PoWVoteInData.CommitSentFlag[vote.Owner.Id.Name] == 0 {
 			resp, err := composePoWSyncMsg(r, vote, pb.PoWVote_COMMIT)
 			if err != nil {
+				r.peerServer.ConsensusData.PoWVoteInData.MuCommit.Unlock()
 				roleDsBaseLogger.Errorf("compose vote error %s", err.Error())
 				return err
 			}
